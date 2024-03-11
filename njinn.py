@@ -1,24 +1,30 @@
 
+import json
 import os
-import requests
+import http.client
 import sys
 import datetime
 import logging
 
-
+directive = { 
+    "content": """
+    I communicate in three sentences max. 
+    I don't use new line characters. 
+    I am an expert solutions architect, how may I serve you?""", "role": "system"}
 user_input = ""
-context_messages = []
 today = datetime.date.today()
 date_dir = str(today.year) + "/" + str(today.month) + "/" + str(today.day) + "/"
 
 logging.basicConfig()
 log = logging.getLogger("ai_terminal_helper")
-log.setLevel(logging.INFO)
+# log.setLevel(logging.INFO)
+# log.setLevel(logging.DEBUG)
 base_url = "https://api.openai.com/v1/chat/completions"
 openai_apikey = os.getenv('OPENAI_API_KEY')
 base_log_file_path = os.getenv('AI_LOG_PATH')
 
 class API:
+    base_url = "api.openai.com"
     def headers(self):
         return {
                     "Content-Type": "application/json",
@@ -26,63 +32,71 @@ class API:
                 }
     def post(self, messages):
         data = {
-                    "model": "gpt-4",
+                    "model": "gpt-3.5-turbo-0125",
                     "messages": messages,
                     "temperature": 0.7
                 }
+        data = json.dumps(data).encode("utf-8")
+        conn = http.client.HTTPSConnection(self.base_url)
 
-        return requests.post(
-                base_url, 
-                headers=self.headers(),
-                data=data
-            )
-        
-        
-def print_morning_message():
-    log.info('Time is ' + str(today.ctime()) + "\n")
-
+        conn.request("POST", "/v1/chat/completions", data, self.headers())
+        res = conn.getresponse()
+        data = res.read()
+        log.info(data)
+        decoded_data = data.decode("utf-8")
+        json_data = json.loads(decoded_data)
+        if "error" in json_data:
+            raise Exception(json_data["error"])
+        return json_data
 
 # Ensure OPENAI_API_KEY is set in your environment variables
 
 
 # Conversation log file path
-file_name = "conversation.log"
+base_log_file_path = "/Users/bowers/scripts/mount/logs/"
+file_name = "conversation.jsonl"
 
 def get_file_path():
     date_dir = str(datetime.date.today().year) + "/" + str(datetime.date.today().month) + "/" + str(datetime.date.today().day) + "/"
     return base_log_file_path + date_dir + file_name
 
 def get_last_messages(newest_message):
-    n = 10
-    log.debug("reading path: " + get_file_path())
+    n = 10  # or any other number representing the conversation context size you want
     messages = []
     try:
         with open(get_file_path(), "r") as log_file:
-            lines = log_file.readlines()
-            # Ensuring we're getting the last N pairs of lines (system-user)
-            mes = lines[-n*2:]
-            if (len(mes) > 1 != 0):
-                messages.append({"content": mes[0], "role": "user"})
-                messages.append({"content": mes[1], "role": "system"})
+            for line in reversed(list(log_file)):
+                if len(messages) >= n:
+                    break
+                message = json.loads(line.strip())
+                messages.append(message)
     except FileNotFoundError:
-        print_morning_message()
-    log.debug("messages: " + str(messages) + "\n")
-    dict = {"content": newest_message, "role": "user"}
-    messages.append(dict)
-    log.debug("messages with prompt: \n" + str(messages) + "\n")
+        log.info("File not found. Creating it.")
+
+    messages = list(reversed(messages))  # Reverse again to maintain chronological order
+    messages.insert(0, directive)  # Prepend directive message if needed
+    messages.append({"content": newest_message, "role": "user"})  # Append the new user message
+
+    log.debug(f"messages with prompt: \n{messages}\n")
     return messages
 
 
+
+
 def append_to_log(user_input, ai_response):
-    """Append the structured messages to the conversation log."""
+    """Append the structured messages to the conversation log in JSONL format."""
+    path = os.path.dirname(get_file_path())
     try:
-        os.makedirs(os.path.dirname(get_file_path()), exist_ok=True)
+        os.makedirs(path, exist_ok=True)
         with open(get_file_path(), "a") as log_file:
-            # Write system response (odd lines) and user input (even lines)
-            log_file.write(f"{user_input}\n")    # User (odd)
-            log_file.write(f"{ai_response}\n")  # System (even)
+            # Write user input and system response as JSON objects
+            user_message = json.dumps({"content": user_input, "role": "user"})
+            ai_message = json.dumps({"content": ai_response, "role": "system"})
+            log_file.write(f"{user_message}\n")  # User
+            log_file.write(f"{ai_message}\n")    # System
     except Exception as e:
         log.error(f"Failed to append to log: {e}")
+
 
 
 def generate_prompt():
@@ -90,32 +104,23 @@ def generate_prompt():
     user_input = " ".join(sys.argv[1:])
     return user_input
 
-def convert_logs_to_dict(lines):
-    """Convert every two lines in the log to a dict with roles based on line number parity."""
-    logs_dict = []
-
-    for i in range(0, len(lines), 2):
-        user_lines = lines[i].strip()  # System (odd)
-        try:
-            user_line = lines[i+1].strip()  # User (even)
-        except IndexError:
-            user_line = ""  # In case of an odd number of lines, assume no user line
-
-        entry = {
-            "system": system_line,
-            "user": user_line
-        }
-        logs_dict.append(entry)
-
-    return logs_dict
 
 def ask_openai(messages):
-    log.debug(context_messages)
+    log.debug(messages)
     api = API()
     log.debug("Response")
-    res = api.post(context_messages)
+    res = api.post(messages=messages)
     log.debug(res)
+    response_content = res["choices"][0]["message"]["content"]
+
+    return response_content
     # return choice.message.content
+
+def read_file(file_path):
+    with open(file_path, 'r') as file:
+        lines = file.readlines()
+        for line in lines:
+            print(line)
 
 def delete_last_two_lines(file_path):
     log.info("""Delete the last two lines from the specified file.""")
@@ -140,37 +145,30 @@ def main():
     if '-d' in sys.argv:
         log.info("delete")
         delete_last_two_lines(get_file_path())
-
+    elif '-l' in sys.argv:
+        log.info("logs")
+        read_file(get_file_path())
+    elif '-i' in sys.argv or len(sys.argv) == 1:
+        log.info("interactive")
+        while True:
+            custom_prompt = input("Enter your prompt: ")
+            if custom_prompt == "exit":
+                break
+            messages = get_last_messages(custom_prompt)
+            response = ask_openai(messages)
+            log.info(str(response))
+            append_to_log(custom_prompt, response)
+            print(response)
     else:
         log.debug("delete flag is not set")   
         custom_prompt = " ".join(sys.argv[1:])
+        print(custom_prompt)
         log.info(custom_prompt)
         messages = get_last_messages(custom_prompt)
         response = ask_openai(messages)
         log.info(str(response))
-        respone_content = response["choices"][0]["message"]["content"]
-        log.info(str(respone_content))
-        # append_to_log(custom_prompt, respone_content)
-        log.info(str(messages[-1]["content"]))
-        log.info(str(messages[-2]["content"]))
-
-    # for context_message in context_messages:
-    #     user_message = context_messages[0]
-    #     system_message = context_messages[1]
-    # print(context_messages)
-
-    # ai_response = ask_openai(custom_prompt, context_messages)
-    # print(json.dumps({"role": "system", "content": ai_response}))
-    # append_to_log(custom_prompt, ai_response)
+        append_to_log(custom_prompt, response)
+        print(response)
 
 if __name__ == "__main__":
     main()
-
-# curl https://api.openai.com/v1/chat/completions \
-#   -H "Content-Type: application/json" \
-#   -H "Authorization: Bearer $OPENAI_API_KEY" \
-#   -d '{
-#      "model": "gpt-3.5-turbo",
-#      "messages": [{"role": "user", "content": "Say this is a test!"}],
-#      "temperature": 0.7
-#    }'
